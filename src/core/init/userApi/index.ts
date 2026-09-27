@@ -10,7 +10,7 @@ import { log, setUserApiList, setUserApiStatus } from '@/core/userApi'
 import settingState from '@/store/setting/state'
 import BackgroundTimer from 'react-native-background-timer'
 import { fetchData } from './request'
-import { getUserApiList } from '@/utils/data'
+import { getUserApiList, installBuiltinUserApis } from '@/utils/data'
 import { confirmDialog, openUrl, tipDialog } from '@/utils/tools'
 
 export default async (setting: LX.AppSetting) => {
@@ -277,6 +277,13 @@ export default async (setting: LX.AppSetting) => {
         break
     }
   })
+
+  // 安装/同步随应用内置的音源（首次启动导入，应用升级时增量更新）
+  try {
+    await installBuiltinUserApis()
+  } catch (err) {
+    log.r_error('Install builtin user apis failed:', err)
+  }
 
   setUserApiList(await getUserApiList())
 }

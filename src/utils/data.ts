@@ -9,6 +9,7 @@ import {
 } from '@/plugins/storage'
 import { DEFAULT_SETTING, LIST_IDS, storageDataPrefix, type NAV_ID_Type } from '@/config/constant'
 import { throttle } from './common'
+import { builtinUserApiSources, builtinUserApiVersion } from '@/resources/userApiSources'
 // import { gzip, ungzip } from '@/utils/nativeModules/gzip'
 // import { readFile, writeFile, temporaryDirectoryPath, unlink } from '@/utils/fs'
 // import { isNotificationsEnabled, openNotificationPermissionActivity, shareText } from '@/utils/nativeModules/utils'
@@ -36,6 +37,9 @@ const syncHostHistoryPrefix = storageDataPrefix.syncHostHistory
 const listPrefix = storageDataPrefix.list
 const dislikeListPrefix = storageDataPrefix.dislikeList
 const userApiPrefix = storageDataPrefix.userApi
+const userApiBuiltinVersionKey = storageDataPrefix.userApiBuiltinVersion
+const userApiBuiltinRemovedKey = storageDataPrefix.userApiBuiltinRemoved
+const builtinUserApiIdPrefix = 'user_api_builtin_'
 const openStoragePathPrefix = storageDataPrefix.openStoragePath
 const selectedManagedFolderPrefix = storageDataPrefix.selectedManagedFolder
 const lastSelectQualityKey = storageDataPrefix.lastSelectQuality
@@ -581,6 +585,14 @@ const matchInfo = (scriptInfo: string) => {
 
   return infos as Record<keyof typeof INFO_NAMES, string>
 }
+const parseScriptInfo = (script: string, fallbackName: string) => {
+  const result = /^\/\*[\S|\s]+?\*\//.exec(script)
+  const scriptInfo = result
+    ? matchInfo(result[0])
+    : { name: '', description: '', author: '', homepage: '', version: '' }
+  if (!scriptInfo.name) scriptInfo.name = fallbackName.replace(/\.[^.]+$/, '')
+  return scriptInfo
+}
 export const addUserApi = async (script: string): Promise<LX.UserApi.UserApiInfo> => {
   const result = /^\/\*[\S|\s]+?\*\//.exec(script)
   if (!result) throw new Error(global.i18n.t('user_api_add_failed_tip'))
@@ -601,18 +613,74 @@ export const addUserApi = async (script: string): Promise<LX.UserApi.UserApiInfo
   ])
   return apiInfo
 }
+// 安装随应用内置的音源：
+// - 来源：src/resources/userApiSources（发布时打包进应用）
+// - 逻辑：已安装过的内置源不重复安装（用户删除后也不会自动恢复）；
+//         应用升级导致内置版本变化时，同步更新已有内置源的内容与信息
+export const installBuiltinUserApis = async () => {
+  await getUserApiList()
+  const [savedVersion, removedIds] = await Promise.all([
+    getData<string>(userApiBuiltinVersionKey),
+    getData<string[]>(userApiBuiltinRemovedKey),
+  ])
+  const removedSet = new Set(removedIds ?? [])
+  const needSyncContent = savedVersion !== builtinUserApiVersion
+  const hasMissing = builtinUserApiSources.some(
+    (source) => !removedSet.has(source.id) && !userApis.some((api) => api.id === source.id)
+  )
+  if (!needSyncContent && !hasMissing) return
+
+  const tasks: Array<[string, any]> = []
+  let listChanged = false
+  for (const source of builtinUserApiSources) {
+    if (removedSet.has(source.id)) continue
+    const target = userApis.find((api) => api.id === source.id)
+    if (!target) {
+      userApis.push({
+        id: source.id,
+        ...parseScriptInfo(source.script, source.fileName),
+        allowShowUpdateAlert: true,
+      })
+      tasks.push([`${userApiPrefix}${source.id}`, source.script])
+      listChanged = true
+    } else if (needSyncContent) {
+      const oldScript = await getUserApiScript(source.id)
+      if (oldScript !== source.script) {
+        Object.assign(target, parseScriptInfo(source.script, source.fileName))
+        tasks.push([`${userApiPrefix}${source.id}`, source.script])
+        listChanged = true
+      }
+    }
+  }
+
+  if (listChanged) tasks.push([userApiPrefix, userApis])
+  if (needSyncContent || listChanged) tasks.push([userApiBuiltinVersionKey, builtinUserApiVersion])
+  if (tasks.length) await saveDataMultiple(tasks)
+}
 export const removeUserApi = async (ids: string[]) => {
   if (!userApis) return []
   const _ids: string[] = []
+  const removedBuiltinIds: string[] = []
   for (let index = userApis.length - 1; index > -1; index--) {
     if (ids.includes(userApis[index].id)) {
       _ids.push(`${userApiPrefix}${userApis[index].id}`)
+      if (userApis[index].id.startsWith(builtinUserApiIdPrefix)) {
+        removedBuiltinIds.push(userApis[index].id)
+      }
       userApis.splice(index, 1)
       ids.splice(index, 1)
     }
   }
   await saveData(userApiPrefix, userApis)
   if (_ids.length) await removeDataMultiple(_ids)
+  if (removedBuiltinIds.length) {
+    // 记录被用户删除的内置音源，后续版本更新时不再自动恢复
+    const savedRemovedIds = (await getData<string[]>(userApiBuiltinRemovedKey)) ?? []
+    await saveData(
+      userApiBuiltinRemovedKey,
+      Array.from(new Set([...savedRemovedIds, ...removedBuiltinIds]))
+    )
+  }
   return [...userApis]
 }
 export const setUserApiAllowShowUpdateAlert = async (id: string, enable: boolean) => {
